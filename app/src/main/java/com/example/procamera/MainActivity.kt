@@ -4,10 +4,17 @@ import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ContentValues
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.hardware.Sensor
+import android.hardware.SensorEvent
+import android.hardware.SensorEventListener
+import android.hardware.SensorManager
 import android.hardware.camera2.CaptureRequest
+import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Size
 import android.view.MotionEvent
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -16,6 +23,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.camera2.interop.Camera2Interop
 import androidx.camera.camera2.interop.ExperimentalCamera2Interop
+import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
@@ -32,6 +40,8 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -39,19 +49,21 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
@@ -62,14 +74,23 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.atan2
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -115,12 +136,27 @@ enum class Stab(val label: String) {
     EIS("กันสั่น: EIS")
 }
 
+enum class CaptureMode { PHOTO, VIDEO, PORTRAIT, PANO }
+
+enum class AspectOption(val label: String, val ratio: Float, val camerax: Int?) {
+    R4_3("4:3", 4f / 3f, AspectRatio.RATIO_4_3),
+    R1_1("1:1", 1f, null),
+    R16_9("16:9", 16f / 9f, AspectRatio.RATIO_16_9),
+    FULL("เต็มจอ", 0f, null)
+}
+
 fun qualityLabel(q: Quality): String = when (q) {
     Quality.UHD -> "4K"
     Quality.FHD -> "1080p"
     Quality.HD -> "720p"
     Quality.SD -> "480p"
     else -> "?"
+}
+
+fun flashLabel(mode: Int): String = when (mode) {
+    ImageCapture.FLASH_MODE_ON -> "เปิด"
+    ImageCapture.FLASH_MODE_AUTO -> "อัตโนมัติ"
+    else -> "ปิด"
 }
 
 @SuppressLint("MissingPermission", "ClickableViewAccessibility")
@@ -134,11 +170,19 @@ fun CameraScreen() {
 
     // ---- settings ----
     var lens by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
-    var videoMode by remember { mutableStateOf(false) }
+    var mode by remember { mutableStateOf(CaptureMode.PHOTO) }
+    val videoMode = mode == CaptureMode.VIDEO
     var stab by remember { mutableStateOf(Stab.OIS) }
     var quality by remember { mutableStateOf(Quality.FHD) }
     var fps by remember { mutableIntStateOf(30) }
     var supported by remember { mutableStateOf<List<Quality>>(emptyList()) }
+    var aspect by remember { mutableStateOf(AspectOption.R4_3) }
+    var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_OFF) }
+    var gridOn by remember { mutableStateOf(true) }
+    var levelOn by remember { mutableStateOf(false) }
+    var rawOn by remember { mutableStateOf(false) }
+    var selfTimer by remember { mutableIntStateOf(0) }
+    var showSettings by remember { mutableStateOf(false) }
 
     // ---- camera objects ----
     var camera by remember { mutableStateOf<Camera?>(null) }
@@ -156,10 +200,18 @@ fun CameraScreen() {
     var evStep by remember { mutableFloatStateOf(0f) }
     var torch by remember { mutableStateOf(false) }
 
+    // ---- capture feedback ----
+    var lastMediaUri by remember { mutableStateOf<Uri?>(null) }
+    var thumbnail by remember { mutableStateOf<Bitmap?>(null) }
+    var countdownValue by remember { mutableStateOf<Int?>(null) }
+    var captureTrigger by remember { mutableIntStateOf(0) }
+    var recordSeconds by remember { mutableIntStateOf(0) }
+    var rollDeg by remember { mutableFloatStateOf(0f) }
+
     val isRecording = recording != null
 
     // ---- bind camera whenever the key settings change ----
-    LaunchedEffect(lens, quality, fps, stab) {
+    LaunchedEffect(lens, quality, fps, stab, aspect) {
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             try {
@@ -172,13 +224,16 @@ fun CameraScreen() {
                 // Preview
                 val previewBuilder = Preview.Builder()
                 if (stab == Stab.EIS) previewBuilder.setPreviewStabilizationEnabled(true)
+                aspect.camerax?.let { previewBuilder.setTargetAspectRatio(it) }
                 val preview = previewBuilder.build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
 
                 // Photo: prioritize quality over speed
-                val ic = ImageCapture.Builder()
+                val icBuilder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                    .build()
+                aspect.camerax?.let { icBuilder.setTargetAspectRatio(it) }
+                val ic = icBuilder.build()
+                ic.flashMode = flashMode
 
                 // Video
                 val recorder = Recorder.Builder()
@@ -243,10 +298,55 @@ fun CameraScreen() {
         }, executor)
     }
 
+    // keep flash mode in sync without a full rebind
+    LaunchedEffect(flashMode, imageCapture) {
+        imageCapture?.flashMode = flashMode
+    }
+
+    // recording timer (mm:ss)
+    LaunchedEffect(isRecording) {
+        recordSeconds = 0
+        while (isRecording) {
+            delay(1000)
+            recordSeconds++
+        }
+    }
+
+    // horizon level using the accelerometer
+    DisposableEffect(levelOn) {
+        if (!levelOn) return@DisposableEffect onDispose { }
+        val sm = context.getSystemService(SensorManager::class.java)
+        val sensor = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val listener = object : SensorEventListener {
+            override fun onSensorChanged(event: SensorEvent) {
+                val x = event.values[0]
+                val y = event.values[1]
+                rollDeg = Math.toDegrees(atan2(-x.toDouble(), y.toDouble())).toFloat().let {
+                    if (it > 90f) it - 180f else if (it < -90f) it + 180f else it
+                }
+            }
+            override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+        }
+        sensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI) }
+        onDispose { sm?.unregisterListener(listener) }
+    }
+
+    // load a thumbnail of the last photo/video
+    LaunchedEffect(lastMediaUri) {
+        val uri = lastMediaUri ?: return@LaunchedEffect
+        thumbnail = try {
+            withContext(Dispatchers.IO) {
+                context.contentResolver.loadThumbnail(uri, Size(160, 160), null)
+            }
+        } catch (e: Exception) {
+            null
+        }
+    }
+
     // ---- actions ----
     fun stamp() = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
 
-    fun takePhoto() {
+    fun takePhotoActual() {
         val ic = imageCapture ?: return
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "IMG_${stamp()}")
@@ -261,12 +361,31 @@ fun CameraScreen() {
         ic.takePicture(opts, executor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
                 Toast.makeText(context, "บันทึกรูปแล้ว", Toast.LENGTH_SHORT).show()
+                output.savedUri?.let { lastMediaUri = it }
             }
 
             override fun onError(e: ImageCaptureException) {
                 Toast.makeText(context, "ถ่ายรูปไม่สำเร็จ: ${e.message}", Toast.LENGTH_LONG).show()
             }
         })
+    }
+
+    fun requestPhoto() {
+        if (selfTimer <= 0) {
+            takePhotoActual()
+        } else {
+            captureTrigger++
+        }
+    }
+
+    LaunchedEffect(captureTrigger) {
+        if (captureTrigger == 0) return@LaunchedEffect
+        for (s in selfTimer downTo 1) {
+            countdownValue = s
+            delay(1000)
+        }
+        countdownValue = null
+        takePhotoActual()
     }
 
     fun toggleRecord() {
@@ -297,127 +416,90 @@ fun CameraScreen() {
                 recording = null
                 val msg = if (event.hasError()) "บันทึกวิดีโอไม่สำเร็จ (${event.error})" else "บันทึกวิดีโอแล้ว"
                 Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                if (!event.hasError()) lastMediaUri = event.outputResults.outputUri
             }
         }
     }
+
+    val zoomSteps = listOf(0.5f, 1f, 2f, 5f).filter { it in minZoom..maxZoom || minZoom > maxZoom }
 
     // ---- UI ----
     Box(Modifier.fillMaxSize().background(Color.Black)) {
-        AndroidView(
-            factory = { previewView },
-            modifier = Modifier.fillMaxSize(),
-            update = { pv ->
-                // tap to focus
-                pv.setOnTouchListener { v, e ->
-                    if (e.action == MotionEvent.ACTION_UP) {
-                        val point = pv.meteringPointFactory.createPoint(e.x, e.y)
-                        camera?.cameraControl?.startFocusAndMetering(
-                            FocusMeteringAction.Builder(point).build()
-                        )
-                        v.performClick()
-                    }
-                    true
-                }
-            }
-        )
 
-        // top bar (video settings)
-        if (videoMode) {
-            Row(
-                Modifier.align(Alignment.TopCenter).padding(top = 40.dp),
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
-            ) {
-                Chip(stab.label, !isRecording) {
-                    stab = Stab.values()[(stab.ordinal + 1) % Stab.values().size]
-                }
-                Chip(qualityLabel(quality), !isRecording) {
-                    val list = supported.filter { it == Quality.SD || it == Quality.HD || it == Quality.FHD || it == Quality.UHD }
-                        .sortedBy { listOf(Quality.SD, Quality.HD, Quality.FHD, Quality.UHD).indexOf(it) }
-                    if (list.isNotEmpty()) {
-                        quality = list[(list.indexOf(quality) + 1) % list.size]
-                    }
-                }
-                Chip("${fps}fps", !isRecording) { fps = if (fps == 30) 60 else 30 }
-            }
+        val viewportModifier = if (aspect != AspectOption.FULL) {
+            Modifier.aspectRatio(aspect.ratio).align(Alignment.Center)
+        } else {
+            Modifier.fillMaxSize()
         }
 
-        // bottom controls
-        Column(
-            Modifier.align(Alignment.BottomCenter).fillMaxWidth().padding(16.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            if (maxZoom > minZoom) {
-                Text("ซูม ${"%.1f".format(zoom)}x", color = Color.White)
-                Slider(
-                    value = zoom,
-                    onValueChange = {
-                        zoom = it
-                        camera?.cameraControl?.setZoomRatio(it)
-                    },
-                    valueRange = minZoom..maxZoom
-                )
-            }
-            if (evMax > evMin) {
-                Text("แสง ${"%.1f".format(evIndex * evStep)} EV", color = Color.White)
-                Slider(
-                    value = evIndex.toFloat(),
-                    onValueChange = {
-                        evIndex = it.toInt()
-                        camera?.cameraControl?.setExposureCompensationIndex(evIndex)
-                    },
-                    valueRange = evMin.toFloat()..evMax.toFloat(),
-                    steps = (evMax - evMin - 1).coerceAtLeast(0)
-                )
-            }
-
-            Row(
-                Modifier.fillMaxWidth().padding(top = 8.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Chip(if (videoMode) "โหมด: วิดีโอ" else "โหมด: รูปภาพ", !isRecording) {
-                    videoMode = !videoMode
+        Box(viewportModifier) {
+            AndroidView(
+                factory = { previewView },
+                modifier = Modifier.fillMaxSize(),
+                update = { pv ->
+                    // tap to focus
+                    pv.setOnTouchListener { v, e ->
+                        if (e.action == MotionEvent.ACTION_UP) {
+                            val point = pv.meteringPointFactory.createPoint(e.x, e.y)
+                            camera?.cameraControl?.startFocusAndMetering(
+                                FocusMeteringAction.Builder(point).build()
+                            )
+                            v.performClick()
+                        }
+                        true
+                    }
                 }
+            )
 
-                val inner = if (isRecording) RoundedCornerShape(10.dp) else CircleShape
+            if (gridOn) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val lineColor = Color.White.copy(alpha = 0.55f)
+                    for (i in 1..2) {
+                        drawLine(lineColor, Offset(w * i / 3f, 0f), Offset(w * i / 3f, h), strokeWidth = 1f)
+                        drawLine(lineColor, Offset(0f, h * i / 3f), Offset(w, h * i / 3f), strokeWidth = 1f)
+                    }
+                }
+            }
+
+            if (levelOn) {
+                val onLevel = kotlin.math.abs(rollDeg) < 1.5f
                 Box(
                     Modifier
-                        .size(76.dp)
-                        .border(4.dp, Color.White, CircleShape)
-                        .padding(8.dp)
-                        .clip(inner)
-                        .background(if (videoMode) Color.Red else Color.White)
-                        .clickable { if (videoMode) toggleRecord() else takePhoto() }
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Chip(if (torch) "ไฟ: เปิด" else "ไฟ: ปิด", true) {
-                        torch = !torch
-                        camera?.cameraControl?.enableTorch(torch)
-                    }
-                    Chip("สลับกล้อง", !isRecording) {
-                        lens = if (lens == CameraSelector.LENS_FACING_BACK)
-                            CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .padding(horizontal = 40.dp)
+                        .rotate(rollDeg),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(Modifier.fillMaxWidth().height(2.dp)) {
+                        drawLine(
+                            color = if (onLevel) Color(0xFF34C759) else Color.White,
+                            start = Offset(0f, size.height / 2f),
+                            end = Offset(size.width, size.height / 2f),
+                            strokeWidth = 4f,
+                            cap = StrokeCap.Round
+                        )
                     }
                 }
             }
-        }
-    }
-}
 
-@Composable
-fun Chip(text: String, enabled: Boolean, onClick: () -> Unit) {
-    Button(
-        onClick = onClick,
-        enabled = enabled,
-        colors = ButtonDefaults.buttonColors(
-            containerColor = Color(0x99000000),
-            contentColor = Color.White,
-            disabledContainerColor = Color(0x55000000),
-            disabledContentColor = Color.Gray
-        ),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 10.dp, vertical = 4.dp)
-    ) {
-        Text(text)
-    }
-}
+            countdownValue?.let {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "$it",
+                        color = Color.White,
+                        style = MaterialTheme.typography.displayLarge
+                    )
+                }
+            }
+        }
+
+        // ---- top bar ----
+        Row(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 40.dp, start = 16.dp, end = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Chip(if (videoMode) "ไฟ: ${if (torch) "เปิด" else "ปิด"}" else "แฟลช: ${flashLabel(flashMode)
