@@ -72,15 +72,6 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.FlashAuto
-import androidx.compose.material.icons.filled.FlashOff
-import androidx.compose.material.icons.filled.FlashOn
-import androidx.compose.material.icons.filled.FlipCameraAndroid
-import androidx.compose.material.icons.filled.GridOn
-import androidx.compose.material.icons.filled.Timer
-import androidx.compose.material.icons.filled.WbSunny
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
@@ -189,10 +180,10 @@ fun qualityLabel(q: Quality): String = when (q) {
     else -> "?"
 }
 
-/** ปุ่มแบบแคปซูลโปร่งแสงสไตล์ iOS Camera */
+/** ปุ่มแบบแคปซูลโปร่งแสงสไตล์ iOS Camera (ใช้สัญลักษณ์ตัวอักษร/อิโมจิ ไม่ต้องพึ่งไลบรารีไอคอนเพิ่ม) */
 @Composable
 fun GlassIcon(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    symbol: String,
     tint: Color = Color.White,
     onClick: () -> Unit
 ) {
@@ -204,7 +195,7 @@ fun GlassIcon(
             .clickable(onClick = onClick),
         contentAlignment = Alignment.Center
     ) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(19.dp))
+        Text(symbol, color = tint, fontSize = 17.sp)
     }
 }
 
@@ -224,7 +215,6 @@ fun GlassLabel(text: String, tint: Color = Color(0xFFFFD60A), onClick: () -> Uni
 
 @SuppressLint("MissingPermission", "ClickableViewAccessibility")
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
-
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
@@ -232,7 +222,7 @@ fun CameraScreen() {
     val executor = remember { ContextCompat.getMainExecutor(context) }
     val previewView = remember { PreviewView(context) }
 
-    // ---- settings ----
+        // ---- settings ----
     var lens by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var mode by remember { mutableStateOf(CaptureMode.PHOTO) }
     val videoMode = mode == CaptureMode.VIDEO || mode == CaptureMode.SLOMO
@@ -456,6 +446,7 @@ fun CameraScreen() {
 
     fun takePhotoActual() {
         val ic = imageCapture ?: return
+        
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "IMG_${stamp()}")
             put(MediaStore.MediaColumns.MIME_TYPE, "image/jpeg")
@@ -680,7 +671,7 @@ fun CameraScreen() {
             }
 
             // กรอบโฟกัสสีเหลือง + ไอคอนพระอาทิตย์ ลากขึ้นลงเพื่อปรับแสง แบบ iPhone
-            val fp = focusPoint
+                        val fp = focusPoint
             AnimatedVisibility(
                 visible = fp != null && focusVisible,
                 enter = fadeIn(),
@@ -695,14 +686,13 @@ fun CameraScreen() {
                                 .size(80.dp)
                                 .border(1.dp, Color(0xFFFFD60A), RoundedCornerShape(2.dp))
                         )
-                        Icon(
-                            Icons.Filled.WbSunny,
-                            contentDescription = null,
-                            tint = Color(0xFFFFD60A),
+                        Text(
+                            "☀",
+                            color = Color(0xFFFFD60A),
+                            fontSize = 15.sp,
                             modifier = Modifier
                                 .align(Alignment.CenterEnd)
                                 .offset(x = 20.dp)
-                                .size(16.dp)
                         )
                     }
                 }
@@ -722,10 +712,10 @@ fun CameraScreen() {
             verticalAlignment = Alignment.CenterVertically
         ) {
             GlassIcon(
-                icon = when (flashMode) {
-                    ImageCapture.FLASH_MODE_ON -> Icons.Filled.FlashOn
-                    ImageCapture.FLASH_MODE_AUTO -> Icons.Filled.FlashAuto
-                    else -> Icons.Filled.FlashOff
+                symbol = when (flashMode) {
+                    ImageCapture.FLASH_MODE_ON -> "⚡"
+                    ImageCapture.FLASH_MODE_AUTO -> "⚡A"
+                    else -> "⚡"
                 },
                 tint = if (flashMode == ImageCapture.FLASH_MODE_OFF) Color.White else Color(0xFFFFD60A)
             ) {
@@ -759,13 +749,13 @@ fun CameraScreen() {
             } else {
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     GlassIcon(
-                        icon = Icons.Filled.Timer,
+                        symbol = "⏱",
                         tint = if (selfTimer > 0) Color(0xFFFFD60A) else Color.White
                     ) {
                         selfTimer = when (selfTimer) { 0 -> 3; 3 -> 10; else -> 0 }
                     }
                     GlassIcon(
-                        icon = Icons.Filled.GridOn,
+                        symbol = "▦",
                         tint = if (gridOn) Color(0xFFFFD60A) else Color.White
                     ) { gridOn = !gridOn }
                 }
@@ -892,7 +882,7 @@ fun CameraScreen() {
                     }
                 }
 
-                GlassIcon(icon = Icons.Filled.FlipCameraAndroid) {
+                GlassIcon(symbol = "🔄") {
                     if (!isRecording && !timelapseActive) {
                         lens = if (lens == CameraSelector.LENS_FACING_BACK) {
                             CameraSelector.LENS_FACING_FRONT
@@ -905,7 +895,3 @@ fun CameraScreen() {
         }
     }
 }
-
-
-
-
