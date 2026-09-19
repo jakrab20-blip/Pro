@@ -179,7 +179,6 @@ fun Pill(text: String, selected: Boolean = false, onClick: () -> Unit) {
             .padding(horizontal = 12.dp, vertical = 6.dp)
     )
 }
-
 @SuppressLint("MissingPermission", "ClickableViewAccessibility")
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
 @Composable
@@ -390,7 +389,6 @@ fun CameraScreen() {
             null
         }
     }
-
     // ---- actions ----
     fun stamp() = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
 
@@ -503,4 +501,259 @@ fun CameraScreen() {
                 }
             )
 
-            if (g
+            if (gridOn) {
+                Canvas(Modifier.fillMaxSize()) {
+                    val w = size.width
+                    val h = size.height
+                    val lineColor = Color.White.copy(alpha = 0.55f)
+                    for (i in 1..2) {
+                        drawLine(lineColor, Offset(w * i / 3f, 0f), Offset(w * i / 3f, h), strokeWidth = 1f)
+                        drawLine(lineColor, Offset(0f, h * i / 3f), Offset(w, h * i / 3f), strokeWidth = 1f)
+                    }
+                }
+            }
+
+            if (levelOn) {
+                val onLevel = kotlin.math.abs(rollDeg) < 1.5f
+                Box(
+                    Modifier
+                        .align(Alignment.Center)
+                        .fillMaxWidth()
+                        .padding(horizontal = 40.dp)
+                        .rotate(rollDeg),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Canvas(Modifier.fillMaxWidth().height(2.dp)) {
+                        drawLine(
+                            color = if (onLevel) Color(0xFF34C759) else Color.White,
+                            start = Offset(0f, size.height / 2f),
+                            end = Offset(size.width, size.height / 2f),
+                            strokeWidth = 4f,
+                            cap = StrokeCap.Round
+                        )
+                    }
+                }
+            }
+
+            countdownValue?.let {
+                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    Text(
+                        text = "$it",
+                        color = Color.White,
+                        style = MaterialTheme.typography.displayLarge
+                    )
+                }
+            }
+        }
+
+        // ---- top bar ----
+        val torchOrFlashLabel = if (videoMode) {
+            "ไฟ: " + (if (torch) "เปิด" else "ปิด")
+        } else {
+            "แฟลช: " + flashLabel(flashMode)
+        }
+        Row(
+            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 40.dp, start = 16.dp, end = 16.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Pill(torchOrFlashLabel) {
+                if (videoMode) {
+                    torch = !torch
+                    camera?.cameraControl?.enableTorch(torch)
+                } else {
+                    flashMode = when (flashMode) {
+                        ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
+                        ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+                        else -> ImageCapture.FLASH_MODE_OFF
+                    }
+                }
+            }
+
+            if (isRecording) {
+                Text(
+                    text = "● " + "%02d:%02d".format(recordSeconds / 60, recordSeconds % 60),
+                    color = Color(0xFFFF3B30),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.55f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            }
+
+            Pill("ตั้งค่า", selected = showSettings) { showSettings = !showSettings }
+        }
+
+        // ---- settings panel ----
+        if (showSettings) {
+            Column(
+                Modifier
+                    .align(Alignment.TopCenter)
+                    .padding(top = 92.dp, start = 16.dp, end = 16.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Pill("สัดส่วน: ${aspect.label}") {
+                        val all = AspectOption.values()
+                        aspect = all[(aspect.ordinal + 1) % all.size]
+                    }
+                    Pill("ตัวตั้งเวลา: " + if (selfTimer == 0) "ปิด" else "${selfTimer}s") {
+                        selfTimer = when (selfTimer) {
+                            0 -> 3
+                            3 -> 10
+                            else -> 0
+                        }
+                    }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Pill("ตาราง", selected = gridOn) { gridOn = !gridOn }
+                    Pill("ระดับน้ำ", selected = levelOn) { levelOn = !levelOn }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Pill(stab.label) {
+                        val all = Stab.values()
+                        stab = all[(stab.ordinal + 1) % all.size]
+                    }
+                    Pill("${fps}fps") { fps = if (fps == 30) 60 else 30 }
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Pill("วิดีโอ: ${qualityLabel(quality)}") {
+                        val options = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
+                            .filter { it in supported }
+                        if (options.isNotEmpty()) {
+                            val idx = options.indexOf(quality)
+                            quality = options[(idx + 1) % options.size]
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---- bottom controls ----
+        Column(
+            Modifier
+                .align(Alignment.BottomCenter)
+                .fillMaxWidth()
+                .padding(bottom = 32.dp, start = 16.dp, end = 16.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // zoom buttons
+            if (zoomSteps.isNotEmpty()) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    zoomSteps.forEach { z ->
+                        Pill(
+                            text = (if (z < 1f) "0.5" else z.toInt().toString()) + "x",
+                            selected = kotlin.math.abs(zoom - z) < 0.05f
+                        ) {
+                            zoom = z
+                            camera?.cameraControl?.setZoomRatio(z)
+                        }
+                    }
+                }
+            }
+
+            // exposure compensation
+            if (evMax > evMin) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    Text("EV", color = Color.White)
+                    Slider(
+                        value = evIndex.toFloat(),
+                        onValueChange = {
+                            evIndex = it.roundToInt()
+                            camera?.cameraControl?.setExposureCompensationIndex(evIndex)
+                        },
+                        valueRange = evMin.toFloat()..evMax.toFloat(),
+                        modifier = Modifier.weight(1f)
+                    )
+                    Text("%+.1f".format(evIndex * evStep), color = Color.White)
+                }
+            }
+
+            // mode selector
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Pill("รูปภาพ", selected = mode == CaptureMode.PHOTO) {
+                    if (!isRecording) mode = CaptureMode.PHOTO
+                }
+                Pill("วิดีโอ", selected = mode == CaptureMode.VIDEO) {
+                    if (countdownValue == null) mode = CaptureMode.VIDEO
+                }
+            }
+
+            // thumbnail | shutter | flip camera
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                val thumb = thumbnail
+                if (thumb != null) {
+                    Image(
+                        bitmap = thumb.asImageBitmap(),
+                        contentDescription = null,
+                        contentScale = ContentScale.Crop,
+                        modifier = Modifier
+                            .size(56.dp)
+                            .clip(CircleShape)
+                            .border(2.dp, Color.White, CircleShape)
+                            .clickable {
+                                lastMediaUri?.let { uri ->
+                                    try {
+                                        context.startActivity(
+                                            Intent(Intent.ACTION_VIEW, uri)
+                                                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                        )
+                                    } catch (e: Exception) {
+                                        Toast.makeText(context, "เปิดแกลเลอรีไม่ได้", Toast.LENGTH_SHORT).show()
+                                    }
+                                }
+                            }
+                    )
+                } else {
+                    Box(Modifier.size(56.dp))
+                }
+
+                // shutter
+                Box(
+                    Modifier
+                        .size(76.dp)
+                        .border(4.dp, Color.White, CircleShape)
+                        .padding(6.dp)
+                        .clip(CircleShape)
+                        .background(
+                            if (videoMode) Color(0xFFFF3B30) else Color.White
+                        )
+                        .clickable {
+                            if (videoMode) toggleRecord() else requestPhoto()
+                        },
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isRecording) {
+                        Box(
+                            Modifier
+                                .size(24.dp)
+                                .clip(RoundedCornerShape(4.dp))
+                                .background(Color.White)
+                        )
+                    }
+                }
+
+                // flip camera
+                Pill("สลับ") {
+                    if (!isRecording) {
+                        lens = if (lens == CameraSelector.LENS_FACING_BACK) {
+                            CameraSelector.LENS_FACING_FRONT
+                        } else {
+                            CameraSelector.LENS_FACING_BACK
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
