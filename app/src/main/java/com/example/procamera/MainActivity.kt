@@ -3,6 +3,7 @@ package com.example.procamera
 import android.Manifest
 import android.annotation.SuppressLint
 import android.content.ContentValues
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.hardware.Sensor
@@ -14,8 +15,10 @@ import android.net.Uri
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Range
+import android.util.Rational
 import android.util.Size
 import android.view.MotionEvent
+import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -30,6 +33,8 @@ import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageCapture
 import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
+import androidx.camera.core.UseCaseGroup
+import androidx.camera.core.ViewPort
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.video.FallbackStrategy
 import androidx.camera.video.MediaStoreOutputOptions
@@ -49,7 +54,6 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -91,6 +95,7 @@ import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Locale
 import kotlin.math.atan2
+import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -136,13 +141,16 @@ enum class Stab(val label: String) {
     EIS("กันสั่น: EIS")
 }
 
-enum class CaptureMode { PHOTO, VIDEO, PORTRAIT, PANO }
+enum class CaptureMode { PHOTO, VIDEO }
 
-enum class AspectOption(val label: String, val ratio: Float, val camerax: Int?) {
-    R4_3("4:3", 4f / 3f, AspectRatio.RATIO_4_3),
-    R1_1("1:1", 1f, null),
-    R16_9("16:9", 16f / 9f, AspectRatio.RATIO_16_9),
-    FULL("เต็มจอ", 0f, null)
+// w:h เป็นอัตราส่วนแนวตั้ง (portrait) ของช่องมองภาพ
+enum class AspectOption(val label: String, val w: Int, val h: Int, val camerax: Int?) {
+    R4_3("4:3", 3, 4, AspectRatio.RATIO_4_3),
+    R1_1("1:1", 1, 1, AspectRatio.RATIO_4_3),
+    R16_9("16:9", 9, 16, AspectRatio.RATIO_16_9),
+    FULL("เต็มจอ", 0, 0, null);
+
+    val ratio: Float get() = if (h == 0) 0f else w.toFloat() / h
 }
 
 fun qualityLabel(q: Quality): String = when (q) {
@@ -157,6 +165,19 @@ fun flashLabel(mode: Int): String = when (mode) {
     ImageCapture.FLASH_MODE_ON -> "เปิด"
     ImageCapture.FLASH_MODE_AUTO -> "อัตโนมัติ"
     else -> "ปิด"
+}
+
+@Composable
+fun Pill(text: String, selected: Boolean = false, onClick: () -> Unit) {
+    Text(
+        text = text,
+        color = if (selected) Color(0xFFFFD60A) else Color.White,
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(Color.Black.copy(alpha = 0.55f))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 6.dp)
+    )
 }
 
 @SuppressLint("MissingPermission", "ClickableViewAccessibility")
@@ -180,7 +201,6 @@ fun CameraScreen() {
     var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_OFF) }
     var gridOn by remember { mutableStateOf(true) }
     var levelOn by remember { mutableStateOf(false) }
-    var rawOn by remember { mutableStateOf(false) }
     var selfTimer by remember { mutableIntStateOf(0) }
     var showSettings by remember { mutableStateOf(false) }
 
@@ -267,12 +287,38 @@ fun CameraScreen() {
                 }
                 val vc = vb.build()
 
+                // ViewPort ทำให้รูป/วิดีโอที่บันทึกถูกครอปตรงกับที่เห็นบนจอ (เช่น 1:1)
+                val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
+                fun buildGroup(withVideo: Boolean): UseCaseGroup {
+                    val b = UseCaseGroup.Builder().addUseCase(preview).addUseCase(ic)
+                    if (withVideo) b.addUseCase(vc)
+                    if (aspect != AspectOption.FULL) {
+                        b.setViewPort(
+                            ViewPort.Builder(Rational(aspect.w, aspect.h), rotation).build()
+                        )
+                    }
+                    return b.build()
+                }
+
                 provider.unbindAll()
-                val cam = provider.bindToLifecycle(lifecycleOwner, selector, preview, ic, vc)
+                var withVideo = true
+                val cam = try {
+                    provider.bindToLifecycle(lifecycleOwner, selector, buildGroup(true))
+                } catch (e: Exception) {
+                    // บางเครื่องผูก Preview + Photo + Video พร้อมกันไม่ได้ -> ถอยไปใช้โหมดรูปอย่างเดียว
+                    withVideo = false
+                    provider.unbindAll()
+                    Toast.makeText(
+                        context,
+                        "เครื่องนี้ใช้วิดีโอด้วยตัวเลือกนี้ไม่ได้ (${e.message}) จึงเหลือโหมดรูปภาพ",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    provider.bindToLifecycle(lifecycleOwner, selector, buildGroup(false))
+                }
 
                 camera = cam
                 imageCapture = ic
-                videoCapture = vc
+                videoCapture = if (withVideo) vc else null
 
                 cam.cameraInfo.zoomState.value?.let {
                     minZoom = it.minZoomRatio
@@ -294,6 +340,7 @@ fun CameraScreen() {
                     Toast.LENGTH_LONG
                 ).show()
                 if (fps != 30) fps = 30
+                if (stab == Stab.EIS) stab = Stab.OIS
             }
         }, executor)
     }
@@ -325,9 +372,10 @@ fun CameraScreen() {
                     if (it > 90f) it - 180f else if (it < -90f) it + 180f else it
                 }
             }
+
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
-        sensor?.let { sm.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI) }
+        sensor?.let { sm?.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI) }
         onDispose { sm?.unregisterListener(listener) }
     }
 
@@ -373,7 +421,7 @@ fun CameraScreen() {
     fun requestPhoto() {
         if (selfTimer <= 0) {
             takePhotoActual()
-        } else {
+        } else if (countdownValue == null) {
             captureTrigger++
         }
     }
@@ -394,7 +442,11 @@ fun CameraScreen() {
             current.stop()
             return
         }
-        val vc = videoCapture ?: return
+        val vc = videoCapture
+        if (vc == null) {
+            Toast.makeText(context, "ตัวเลือกนี้ยังอัดวิดีโอไม่ได้", Toast.LENGTH_SHORT).show()
+            return
+        }
         val values = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, "VID_${stamp()}")
             put(MediaStore.MediaColumns.MIME_TYPE, "video/mp4")
@@ -421,7 +473,7 @@ fun CameraScreen() {
         }
     }
 
-    val zoomSteps = listOf(0.5f, 1f, 2f, 5f).filter { it in minZoom..maxZoom || minZoom > maxZoom }
+    val zoomSteps = listOf(0.5f, 1f, 2f, 5f).filter { it in minZoom..maxZoom }
 
     // ---- UI ----
     Box(Modifier.fillMaxSize().background(Color.Black)) {
@@ -451,58 +503,4 @@ fun CameraScreen() {
                 }
             )
 
-            if (gridOn) {
-                Canvas(Modifier.fillMaxSize()) {
-                    val w = size.width
-                    val h = size.height
-                    val lineColor = Color.White.copy(alpha = 0.55f)
-                    for (i in 1..2) {
-                        drawLine(lineColor, Offset(w * i / 3f, 0f), Offset(w * i / 3f, h), strokeWidth = 1f)
-                        drawLine(lineColor, Offset(0f, h * i / 3f), Offset(w, h * i / 3f), strokeWidth = 1f)
-                    }
-                }
-            }
-
-            if (levelOn) {
-                val onLevel = kotlin.math.abs(rollDeg) < 1.5f
-                Box(
-                    Modifier
-                        .align(Alignment.Center)
-                        .fillMaxWidth()
-                        .padding(horizontal = 40.dp)
-                        .rotate(rollDeg),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Canvas(Modifier.fillMaxWidth().height(2.dp)) {
-                        drawLine(
-                            color = if (onLevel) Color(0xFF34C759) else Color.White,
-                            start = Offset(0f, size.height / 2f),
-                            end = Offset(size.width, size.height / 2f),
-                            strokeWidth = 4f,
-                            cap = StrokeCap.Round
-                        )
-                    }
-                }
-            }
-
-            countdownValue?.let {
-                Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "$it",
-                        color = Color.White,
-                        style = MaterialTheme.typography.displayLarge
-                    )
-                }
-            }
-        }
-
-        // ---- top bar ----
-        val torchOrFlashLabel = if (videoMode) {
-            "ไฟ: " + (if (torch) "เปิด" else "ปิด")
-        } else {
-            "แฟลช: " + flashLabel(flashMode)
-        }
-        Row(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 40.dp, start = 16.dp, end = 16.dp),
-            horizontalArrangement = Arrangement.SpaceBetween,
-   
+            if (g
