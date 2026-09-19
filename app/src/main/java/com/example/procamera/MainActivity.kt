@@ -497,9 +497,12 @@ fun CameraScreen() {
         }
 
         // ---- top bar ----
+        val torchOrFlashLabel = if (videoMode) {
+            "ไฟ: " + (if (torch) "เปิด" else "ปิด")
+        } else {
+            "แฟลช: " + flashLabel(flashMode)
+        }
         Row(
             Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 40.dp, start = 16.dp, end = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Chip(if (videoMode) "ไฟ: ${if (torch) "เปิด" else "ปิด"}" else "แฟลช: ${flashLabel(flashMode)
+   
