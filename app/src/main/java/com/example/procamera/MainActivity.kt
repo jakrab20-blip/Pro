@@ -18,6 +18,7 @@ import android.util.Range
 import android.util.Rational
 import android.util.Size
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.Surface
 import android.widget.Toast
 import androidx.activity.ComponentActivity
@@ -45,25 +46,42 @@ import androidx.camera.video.Recording
 import androidx.camera.video.VideoCapture
 import androidx.camera.video.VideoRecordEvent
 import androidx.camera.view.PreviewView
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.FlashAuto
+import androidx.compose.material.icons.filled.FlashOff
+import androidx.compose.material.icons.filled.FlashOn
+import androidx.compose.material.icons.filled.FlipCameraAndroid
+import androidx.compose.material.icons.filled.GridOn
+import androidx.compose.material.icons.filled.Timer
+import androidx.compose.material.icons.filled.WbSunny
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
@@ -86,7 +104,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.Dispatchers
@@ -94,6 +114,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.atan2
 import kotlin.math.roundToInt
 
@@ -136,12 +157,19 @@ fun Root() {
 }
 
 enum class Stab(val label: String) {
-    OFF("กันสั่น: ปิด"),
-    OIS("กันสั่น: OIS"),
-    EIS("กันสั่น: EIS")
+    OFF("ปิด"),
+    OIS("OIS"),
+    EIS("EIS")
 }
 
-enum class CaptureMode { PHOTO, VIDEO }
+// เรียงแบบ iPhone: ไทม์แลปส์ - สโลว์โมชัน - วิดีโอ - ภาพถ่าย - สแควร์
+enum class CaptureMode(val label: String) {
+    TIMELAPSE("ไทม์แลปส์"),
+    SLOMO("สโลว์โมชัน"),
+    VIDEO("วิดีโอ"),
+    PHOTO("ภาพถ่าย"),
+    SQUARE("สแควร์")
+}
 
 // w:h เป็นอัตราส่วนแนวตั้ง (portrait) ของช่องมองภาพ
 enum class AspectOption(val label: String, val w: Int, val h: Int, val camerax: Int?) {
@@ -161,26 +189,42 @@ fun qualityLabel(q: Quality): String = when (q) {
     else -> "?"
 }
 
-fun flashLabel(mode: Int): String = when (mode) {
-    ImageCapture.FLASH_MODE_ON -> "เปิด"
-    ImageCapture.FLASH_MODE_AUTO -> "อัตโนมัติ"
-    else -> "ปิด"
+/** ปุ่มแบบแคปซูลโปร่งแสงสไตล์ iOS Camera */
+@Composable
+fun GlassIcon(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color = Color.White,
+    onClick: () -> Unit
+) {
+    Box(
+        modifier = Modifier
+            .size(38.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = 0.35f))
+            .clickable(onClick = onClick),
+        contentAlignment = Alignment.Center
+    ) {
+        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(19.dp))
+    }
 }
 
 @Composable
-fun Pill(text: String, selected: Boolean = false, onClick: () -> Unit) {
+fun GlassLabel(text: String, tint: Color = Color(0xFFFFD60A), onClick: () -> Unit) {
     Text(
         text = text,
-        color = if (selected) Color(0xFFFFD60A) else Color.White,
+        color = tint,
+        fontSize = 13.sp,
         modifier = Modifier
             .clip(RoundedCornerShape(50))
-            .background(Color.Black.copy(alpha = 0.55f))
+            .background(Color.Black.copy(alpha = 0.35f))
             .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp)
+            .padding(horizontal = 14.dp, vertical = 7.dp)
     )
 }
+
 @SuppressLint("MissingPermission", "ClickableViewAccessibility")
 @androidx.annotation.OptIn(ExperimentalCamera2Interop::class)
+
 @Composable
 fun CameraScreen() {
     val context = LocalContext.current
@@ -191,17 +235,18 @@ fun CameraScreen() {
     // ---- settings ----
     var lens by remember { mutableIntStateOf(CameraSelector.LENS_FACING_BACK) }
     var mode by remember { mutableStateOf(CaptureMode.PHOTO) }
-    val videoMode = mode == CaptureMode.VIDEO
+    val videoMode = mode == CaptureMode.VIDEO || mode == CaptureMode.SLOMO
     var stab by remember { mutableStateOf(Stab.OIS) }
     var quality by remember { mutableStateOf(Quality.FHD) }
-    var fps by remember { mutableIntStateOf(30) }
     var supported by remember { mutableStateOf<List<Quality>>(emptyList()) }
     var aspect by remember { mutableStateOf(AspectOption.R4_3) }
+    // โหมดสแควร์บังคับสัดส่วน 1:1 เสมอ ไม่ว่าผู้ใช้จะตั้งค่าอัตราส่วนไว้อย่างไร
+    val effectiveAspect = if (mode == CaptureMode.SQUARE) AspectOption.R1_1 else aspect
+    // โหมดสโลว์โมชันพยายามอัดที่ 120fps ก่อน ถ้าเครื่องไม่รองรับจะลดลงอัตโนมัติ
+    val effectiveFps = if (mode == CaptureMode.SLOMO) 120 else 30
     var flashMode by remember { mutableIntStateOf(ImageCapture.FLASH_MODE_OFF) }
     var gridOn by remember { mutableStateOf(true) }
-    var levelOn by remember { mutableStateOf(false) }
     var selfTimer by remember { mutableIntStateOf(0) }
-    var showSettings by remember { mutableStateOf(false) }
 
     // ---- camera objects ----
     var camera by remember { mutableStateOf<Camera?>(null) }
@@ -216,8 +261,14 @@ fun CameraScreen() {
     var evIndex by remember { mutableIntStateOf(0) }
     var evMin by remember { mutableIntStateOf(0) }
     var evMax by remember { mutableIntStateOf(0) }
-    var evStep by remember { mutableFloatStateOf(0f) }
     var torch by remember { mutableStateOf(false) }
+
+    // ---- iPhone-style tap-to-focus + drag-to-expose ----
+    var focusPoint by remember { mutableStateOf<Offset?>(null) }
+    var focusVisible by remember { mutableStateOf(false) }
+    var dragBaselineEv by remember { mutableIntStateOf(0) }
+    var dragBaselineY by remember { mutableFloatStateOf(0f) }
+    var focusToken by remember { mutableIntStateOf(0) }
 
     // ---- capture feedback ----
     var lastMediaUri by remember { mutableStateOf<Uri?>(null) }
@@ -226,11 +277,13 @@ fun CameraScreen() {
     var captureTrigger by remember { mutableIntStateOf(0) }
     var recordSeconds by remember { mutableIntStateOf(0) }
     var rollDeg by remember { mutableFloatStateOf(0f) }
+    var timelapseActive by remember { mutableStateOf(false) }
+    var timelapseShots by remember { mutableIntStateOf(0) }
 
     val isRecording = recording != null
 
     // ---- bind camera whenever the key settings change ----
-    LaunchedEffect(lens, quality, fps, stab, aspect) {
+    LaunchedEffect(lens, quality, effectiveFps, stab, effectiveAspect) {
         val future = ProcessCameraProvider.getInstance(context)
         future.addListener({
             try {
@@ -243,14 +296,14 @@ fun CameraScreen() {
                 // Preview
                 val previewBuilder = Preview.Builder()
                 if (stab == Stab.EIS) previewBuilder.setPreviewStabilizationEnabled(true)
-                aspect.camerax?.let { previewBuilder.setTargetAspectRatio(it) }
+                effectiveAspect.camerax?.let { previewBuilder.setTargetAspectRatio(it) }
                 val preview = previewBuilder.build()
                 preview.setSurfaceProvider(previewView.surfaceProvider)
 
                 // Photo: prioritize quality over speed
                 val icBuilder = ImageCapture.Builder()
                     .setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY)
-                aspect.camerax?.let { icBuilder.setTargetAspectRatio(it) }
+                effectiveAspect.camerax?.let { icBuilder.setTargetAspectRatio(it) }
                 val ic = icBuilder.build()
                 ic.flashMode = flashMode
 
@@ -261,7 +314,7 @@ fun CameraScreen() {
                     )
                     .build()
                 val vb = VideoCapture.Builder(recorder)
-                    .setTargetFrameRate(Range(fps, fps))
+                    .setTargetFrameRate(Range(effectiveFps, effectiveFps))
 
                 when (stab) {
                     Stab.OFF -> {
@@ -272,7 +325,6 @@ fun CameraScreen() {
                             )
                     }
                     Stab.OIS -> {
-                        // Hardware lens-shift stabilization
                         Camera2Interop.Extender(vb)
                             .setCaptureRequestOption(
                                 CaptureRequest.LENS_OPTICAL_STABILIZATION_MODE,
@@ -280,20 +332,18 @@ fun CameraScreen() {
                             )
                     }
                     Stab.EIS -> {
-                        // Electronic (software crop + gyro) stabilization
                         vb.setVideoStabilizationEnabled(true)
                     }
                 }
                 val vc = vb.build()
 
-                // ViewPort ทำให้รูป/วิดีโอที่บันทึกถูกครอปตรงกับที่เห็นบนจอ (เช่น 1:1)
                 val rotation = previewView.display?.rotation ?: Surface.ROTATION_0
                 fun buildGroup(withVideo: Boolean): UseCaseGroup {
                     val b = UseCaseGroup.Builder().addUseCase(preview).addUseCase(ic)
                     if (withVideo) b.addUseCase(vc)
-                    if (aspect != AspectOption.FULL) {
+                    if (effectiveAspect != AspectOption.FULL) {
                         b.setViewPort(
-                            ViewPort.Builder(Rational(aspect.w, aspect.h), rotation).build()
+                            ViewPort.Builder(Rational(effectiveAspect.w, effectiveAspect.h), rotation).build()
                         )
                     }
                     return b.build()
@@ -304,14 +354,21 @@ fun CameraScreen() {
                 val cam = try {
                     provider.bindToLifecycle(lifecycleOwner, selector, buildGroup(true))
                 } catch (e: Exception) {
-                    // บางเครื่องผูก Preview + Photo + Video พร้อมกันไม่ได้ -> ถอยไปใช้โหมดรูปอย่างเดียว
                     withVideo = false
                     provider.unbindAll()
-                    Toast.makeText(
-                        context,
-                        "เครื่องนี้ใช้วิดีโอด้วยตัวเลือกนี้ไม่ได้ (${e.message}) จึงเหลือโหมดรูปภาพ",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    if (effectiveFps > 60) {
+                        Toast.makeText(
+                            context,
+                            "เครื่องนี้อัดสโลว์โมชัน 120fps ไม่ได้ ลองลดเฟรมเรตหรือใช้โหมดวิดีโอปกติ",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    } else {
+                        Toast.makeText(
+                            context,
+                            "เครื่องนี้ใช้วิดีโอด้วยตัวเลือกนี้ไม่ได้ (${e.message}) จึงเหลือโหมดรูปภาพ",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
                     provider.bindToLifecycle(lifecycleOwner, selector, buildGroup(false))
                 }
 
@@ -329,7 +386,6 @@ fun CameraScreen() {
                 val exp = cam.cameraInfo.exposureState
                 evMin = exp.exposureCompensationRange.lower
                 evMax = exp.exposureCompensationRange.upper
-                evStep = exp.exposureCompensationStep.toFloat()
                 evIndex = 0
                 torch = false
             } catch (e: Exception) {
@@ -338,7 +394,6 @@ fun CameraScreen() {
                     "ตัวเลือกนี้ใช้ไม่ได้กับเครื่อง: ${e.message}",
                     Toast.LENGTH_LONG
                 ).show()
-                if (fps != 30) fps = 30
                 if (stab == Stab.EIS) stab = Stab.OIS
             }
         }, executor)
@@ -358,9 +413,16 @@ fun CameraScreen() {
         }
     }
 
-    // horizon level using the accelerometer
-    DisposableEffect(levelOn) {
-        if (!levelOn) return@DisposableEffect onDispose { }
+    // ซ่อนกรอบโฟกัส/เอ็กซ์โพสเชอร์อัตโนมัติหลัง 4 วินาที เหมือน iPhone
+    LaunchedEffect(focusToken) {
+        if (focusToken == 0) return@LaunchedEffect
+        focusVisible = true
+        delay(4000)
+        focusVisible = false
+    }
+
+    // horizon level using the accelerometer (เปิดค้างไว้เสมอ กดกริดเปิดปิดแยก)
+    DisposableEffect(Unit) {
         val sm = context.getSystemService(SensorManager::class.java)
         val sensor = sm?.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val listener = object : SensorEventListener {
@@ -371,7 +433,6 @@ fun CameraScreen() {
                     if (it > 90f) it - 180f else if (it < -90f) it + 180f else it
                 }
             }
-
             override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
         }
         sensor?.let { sm?.registerListener(listener, it, SensorManager.SENSOR_DELAY_UI) }
@@ -389,6 +450,7 @@ fun CameraScreen() {
             null
         }
     }
+
     // ---- actions ----
     fun stamp() = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(System.currentTimeMillis())
 
@@ -406,10 +468,11 @@ fun CameraScreen() {
         ).build()
         ic.takePicture(opts, executor, object : ImageCapture.OnImageSavedCallback {
             override fun onImageSaved(output: ImageCapture.OutputFileResults) {
-                Toast.makeText(context, "บันทึกรูปแล้ว", Toast.LENGTH_SHORT).show()
+                if (mode != CaptureMode.TIMELAPSE) {
+                    Toast.makeText(context, "บันทึกรูปแล้ว", Toast.LENGTH_SHORT).show()
+                }
                 output.savedUri?.let { lastMediaUri = it }
             }
-
             override fun onError(e: ImageCaptureException) {
                 Toast.makeText(context, "ถ่ายรูปไม่สำเร็จ: ${e.message}", Toast.LENGTH_LONG).show()
             }
@@ -471,30 +534,110 @@ fun CameraScreen() {
         }
     }
 
+    // ไทม์แลปส์: ถ่ายรูปทุก 2 วินาทีขณะเปิดใช้งาน (หมายเหตุ: บันทึกเป็นชุดภาพ ยังไม่ได้ประกอบเป็นวิดีโอให้อัตโนมัติ)
+    LaunchedEffect(timelapseActive) {
+        if (!timelapseActive) {
+            timelapseShots = 0
+            return@LaunchedEffect
+        }
+        while (timelapseActive) {
+            takePhotoActual()
+            timelapseShots++
+            delay(2000)
+        }
+    }
+
+    fun onShutterClick() {
+        when (mode) {
+            CaptureMode.PHOTO, CaptureMode.SQUARE -> requestPhoto()
+            CaptureMode.VIDEO, CaptureMode.SLOMO -> toggleRecord()
+            CaptureMode.TIMELAPSE -> {
+                timelapseActive = !timelapseActive
+                if (!timelapseActive) {
+                    Toast.makeText(context, "ถ่ายไทม์แลปส์ไปแล้ว $timelapseShots ภาพ", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
+
+    val shutterActive = isRecording || timelapseActive
     val zoomSteps = listOf(0.5f, 1f, 2f, 5f).filter { it in minZoom..maxZoom }
+    val animatedZoom by animateFloatAsState(targetValue = zoom, label = "zoom")
 
     // ---- UI ----
     Box(Modifier.fillMaxSize().background(Color.Black)) {
 
-        val viewportModifier = if (aspect != AspectOption.FULL) {
-            Modifier.aspectRatio(aspect.ratio).align(Alignment.Center)
+        val viewportModifier = if (effectiveAspect != AspectOption.FULL) {
+            Modifier.aspectRatio(effectiveAspect.ratio).align(Alignment.Center)
         } else {
             Modifier.fillMaxSize()
         }
 
         Box(viewportModifier) {
+            val scaleDetector = remember {
+                ScaleGestureDetector(context, object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                    override fun onScale(detector: ScaleGestureDetector): Boolean {
+                        val cam = camera ?: return true
+                        val base = cam.cameraInfo.zoomState.value?.zoomRatio ?: zoom
+                        val newZoom = (base * detector.scaleFactor).coerceIn(minZoom, maxOf(minZoom, maxZoom))
+                        cam.cameraControl.setZoomRatio(newZoom)
+                        zoom = newZoom
+                        return true
+                    }
+                })
+            }
+
             AndroidView(
                 factory = { previewView },
                 modifier = Modifier.fillMaxSize(),
                 update = { pv ->
-                    // tap to focus
+                    var downX = 0f
+                    var downY = 0f
+                    var downTime = 0L
+                    var dragging = false
+
                     pv.setOnTouchListener { v, e ->
-                        if (e.action == MotionEvent.ACTION_UP) {
-                            val point = pv.meteringPointFactory.createPoint(e.x, e.y)
-                            camera?.cameraControl?.startFocusAndMetering(
-                                FocusMeteringAction.Builder(point).build()
-                            )
-                            v.performClick()
+                        scaleDetector.onTouchEvent(e)
+
+                        when (e.actionMasked) {
+                            MotionEvent.ACTION_DOWN -> {
+                                downX = e.x; downY = e.y
+                                downTime = System.currentTimeMillis()
+                                dragging = false
+                            }
+                            MotionEvent.ACTION_MOVE -> {
+                                if (e.pointerCount == 1 && focusPoint != null && focusVisible) {
+                                    val movedFromDown = abs(e.y - downY) + abs(e.x - downX)
+                                    if (movedFromDown > 24f) {
+                                        if (!dragging) {
+                                            dragging = true
+                                            dragBaselineEv = evIndex
+                                            dragBaselineY = e.y
+                                        }
+                                        val dy = dragBaselineY - e.y // ลากขึ้น = สว่างขึ้น เหมือน iPhone
+                                        val steps = (dy / 28f).roundToInt()
+                                        val newEv = (dragBaselineEv + steps).coerceIn(evMin, evMax)
+                                        if (newEv != evIndex) {
+                                            evIndex = newEv
+                                            camera?.cameraControl?.setExposureCompensationIndex(evIndex)
+                                        }
+                                    }
+                                }
+                            }
+                            MotionEvent.ACTION_UP -> {
+                                val elapsed = System.currentTimeMillis() - downTime
+                                if (!dragging && e.pointerCount <= 1 && elapsed < 300) {
+                                    val point = pv.meteringPointFactory.createPoint(e.x, e.y)
+                                    camera?.cameraControl?.startFocusAndMetering(
+                                        FocusMeteringAction.Builder(point).build()
+                                    )
+                                    focusPoint = Offset(e.x, e.y)
+                                    dragBaselineEv = evIndex
+                                    focusToken++
+                                }
+                                v.performClick()
+                                dragging = false
+                            }
                         }
                         true
                     }
@@ -505,7 +648,7 @@ fun CameraScreen() {
                 Canvas(Modifier.fillMaxSize()) {
                     val w = size.width
                     val h = size.height
-                    val lineColor = Color.White.copy(alpha = 0.55f)
+                    val lineColor = Color.White.copy(alpha = 0.45f)
                     for (i in 1..2) {
                         drawLine(lineColor, Offset(w * i / 3f, 0f), Offset(w * i / 3f, h), strokeWidth = 1f)
                         drawLine(lineColor, Offset(0f, h * i / 3f), Offset(w, h * i / 3f), strokeWidth = 1f)
@@ -513,8 +656,9 @@ fun CameraScreen() {
                 }
             }
 
-            if (levelOn) {
-                val onLevel = kotlin.math.abs(rollDeg) < 1.5f
+            // เส้นระดับน้ำแบบ iPhone (โผล่เฉพาะตอนใกล้แนวนอน)
+            if (abs(rollDeg) < 8f) {
+                val onLevel = abs(rollDeg) < 1.2f
                 Box(
                     Modifier
                         .align(Alignment.Center)
@@ -525,11 +669,40 @@ fun CameraScreen() {
                 ) {
                     Canvas(Modifier.fillMaxWidth().height(2.dp)) {
                         drawLine(
-                            color = if (onLevel) Color(0xFF34C759) else Color.White,
+                            color = if (onLevel) Color(0xFFFFD60A) else Color.White.copy(alpha = 0.7f),
                             start = Offset(0f, size.height / 2f),
                             end = Offset(size.width, size.height / 2f),
-                            strokeWidth = 4f,
+                            strokeWidth = 3f,
                             cap = StrokeCap.Round
+                        )
+                    }
+                }
+            }
+
+            // กรอบโฟกัสสีเหลือง + ไอคอนพระอาทิตย์ ลากขึ้นลงเพื่อปรับแสง แบบ iPhone
+            val fp = focusPoint
+            AnimatedVisibility(
+                visible = fp != null && focusVisible,
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                if (fp != null) {
+                    Box(
+                        Modifier.offset { IntOffset((fp.x - 40.dp.toPx()).roundToInt(), (fp.y - 40.dp.toPx()).roundToInt()) }
+                    ) {
+                        Box(
+                            Modifier
+                                .size(80.dp)
+                                .border(1.dp, Color(0xFFFFD60A), RoundedCornerShape(2.dp))
+                        )
+                        Icon(
+                            Icons.Filled.WbSunny,
+                            contentDescription = null,
+                            tint = Color(0xFFFFD60A),
+                            modifier = Modifier
+                                .align(Alignment.CenterEnd)
+                                .offset(x = 20.dp)
+                                .size(16.dp)
                         )
                     }
                 }
@@ -537,36 +710,29 @@ fun CameraScreen() {
 
             countdownValue?.let {
                 Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Text(
-                        text = "$it",
-                        color = Color.White,
-                        style = MaterialTheme.typography.displayLarge
-                    )
+                    Text(text = "$it", color = Color.White, fontSize = 64.sp)
                 }
             }
         }
 
-        // ---- top bar ----
-        val torchOrFlashLabel = if (videoMode) {
-            "ไฟ: " + (if (torch) "เปิด" else "ปิด")
-        } else {
-            "แฟลช: " + flashLabel(flashMode)
-        }
+        // ---- top bar สไตล์ iOS: แคปซูลลอย โปร่งแสง ----
         Row(
             Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 40.dp, start = 16.dp, end = 16.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
             verticalAlignment = Alignment.CenterVertically
         ) {
-            Pill(torchOrFlashLabel) {
-                if (videoMode) {
-                    torch = !torch
-                    camera?.cameraControl?.enableTorch(torch)
-                } else {
-                    flashMode = when (flashMode) {
-                        ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
-                        ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
-                        else -> ImageCapture.FLASH_MODE_OFF
-                    }
+            GlassIcon(
+                icon = when (flashMode) {
+                    ImageCapture.FLASH_MODE_ON -> Icons.Filled.FlashOn
+                    ImageCapture.FLASH_MODE_AUTO -> Icons.Filled.FlashAuto
+                    else -> Icons.Filled.FlashOff
+                },
+                tint = if (flashMode == ImageCapture.FLASH_MODE_OFF) Color.White else Color(0xFFFFD60A)
+            ) {
+                flashMode = when (flashMode) {
+                    ImageCapture.FLASH_MODE_OFF -> ImageCapture.FLASH_MODE_AUTO
+                    ImageCapture.FLASH_MODE_AUTO -> ImageCapture.FLASH_MODE_ON
+                    else -> ImageCapture.FLASH_MODE_OFF
                 }
             }
 
@@ -574,58 +740,41 @@ fun CameraScreen() {
                 Text(
                     text = "● " + "%02d:%02d".format(recordSeconds / 60, recordSeconds % 60),
                     color = Color(0xFFFF3B30),
+                    fontSize = 15.sp,
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))
-                        .background(Color.Black.copy(alpha = 0.55f))
+                        .background(Color.Black.copy(alpha = 0.45f))
                         .padding(horizontal = 12.dp, vertical = 6.dp)
                 )
+            } else if (timelapseActive) {
+                Text(
+                    text = "● ไทม์แลปส์ $timelapseShots",
+                    color = Color(0xFFFFD60A),
+                    fontSize = 13.sp,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.45f))
+                        .padding(horizontal = 12.dp, vertical = 6.dp)
+                )
+            } else {
+                Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    GlassIcon(
+                        icon = Icons.Filled.Timer,
+                        tint = if (selfTimer > 0) Color(0xFFFFD60A) else Color.White
+                    ) {
+                        selfTimer = when (selfTimer) { 0 -> 3; 3 -> 10; else -> 0 }
+                    }
+                    GlassIcon(
+                        icon = Icons.Filled.GridOn,
+                        tint = if (gridOn) Color(0xFFFFD60A) else Color.White
+                    ) { gridOn = !gridOn }
+                }
             }
 
-            Pill("ตั้งค่า", selected = showSettings) { showSettings = !showSettings }
-        }
-
-        // ---- settings panel ----
-        if (showSettings) {
-            Column(
-                Modifier
-                    .align(Alignment.TopCenter)
-                    .padding(top = 92.dp, start = 16.dp, end = 16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill("สัดส่วน: ${aspect.label}") {
-                        val all = AspectOption.values()
-                        aspect = all[(aspect.ordinal + 1) % all.size]
-                    }
-                    Pill("ตัวตั้งเวลา: " + if (selfTimer == 0) "ปิด" else "${selfTimer}s") {
-                        selfTimer = when (selfTimer) {
-                            0 -> 3
-                            3 -> 10
-                            else -> 0
-                        }
-                    }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill("ตาราง", selected = gridOn) { gridOn = !gridOn }
-                    Pill("ระดับน้ำ", selected = levelOn) { levelOn = !levelOn }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill(stab.label) {
-                        val all = Stab.values()
-                        stab = all[(stab.ordinal + 1) % all.size]
-                    }
-                    Pill("${fps}fps") { fps = if (fps == 30) 60 else 30 }
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Pill("วิดีโอ: ${qualityLabel(quality)}") {
-                        val options = listOf(Quality.UHD, Quality.FHD, Quality.HD, Quality.SD)
-                            .filter { it in supported }
-                        if (options.isNotEmpty()) {
-                            val idx = options.indexOf(quality)
-                            quality = options[(idx + 1) % options.size]
-                        }
-                    }
+            GlassLabel(text = effectiveAspect.label, tint = Color.White) {
+                if (mode != CaptureMode.SQUARE) {
+                    val all = AspectOption.values()
+                    aspect = all[(aspect.ordinal + 1) % all.size]
                 }
             }
         }
@@ -635,60 +784,64 @@ fun CameraScreen() {
             Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .padding(bottom = 32.dp, start = 16.dp, end = 16.dp),
+                .padding(bottom = 28.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(14.dp)
         ) {
-            // zoom buttons
+            // zoom capsule แบบ iPhone (แตะเลือกเร็ว หรือบีบนิ้วสองนิ้วบนจอเพื่อซูมต่อเนื่อง)
             if (zoomSteps.isNotEmpty()) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(50))
+                        .background(Color.Black.copy(alpha = 0.35f))
+                        .padding(4.dp)
+                ) {
                     zoomSteps.forEach { z ->
-                        Pill(
-                            text = (if (z < 1f) "0.5" else z.toInt().toString()) + "x",
-                            selected = kotlin.math.abs(zoom - z) < 0.05f
-                        ) {
-                            zoom = z
-                            camera?.cameraControl?.setZoomRatio(z)
-                        }
+                        val selected = abs(animatedZoom - z) < 0.35f
+                        Text(
+                            text = (if (z < 1f) "0.5" else if (z == z.toInt().toFloat()) z.toInt().toString() else z.toString()) + "×",
+                            color = if (selected) Color(0xFFFFD60A) else Color.White,
+                            fontSize = if (selected) 13.sp else 11.sp,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .background(if (selected) Color.Black.copy(alpha = 0.5f) else Color.Transparent)
+                                .clickable {
+                                    zoom = z
+                                    camera?.cameraControl?.setZoomRatio(z)
+                                }
+                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                        )
                     }
                 }
             }
 
-            // exposure compensation
-            if (evMax > evMin) {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    Text("EV", color = Color.White)
-                    Slider(
-                        value = evIndex.toFloat(),
-                        onValueChange = {
-                            evIndex = it.roundToInt()
-                            camera?.cameraControl?.setExposureCompensationIndex(evIndex)
-                        },
-                        valueRange = evMin.toFloat()..evMax.toFloat(),
-                        modifier = Modifier.weight(1f)
+            // mode carousel แบบเลื่อนแนวนอนของ iPhone
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(22.dp)
+            ) {
+                Spacer(Modifier.width(60.dp))
+                CaptureMode.values().forEach { m ->
+                    val selected = m == mode
+                    Text(
+                        text = m.label,
+                        color = if (selected) Color(0xFFFFD60A) else Color.White.copy(alpha = 0.65f),
+                        fontSize = if (selected) 15.sp else 13.sp,
+                        modifier = Modifier
+                            .clickable(enabled = !isRecording && !timelapseActive) { mode = m }
+                            .padding(vertical = 4.dp)
                     )
-                    Text("%+.1f".format(evIndex * evStep), color = Color.White)
                 }
-            }
-
-            // mode selector
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Pill("รูปภาพ", selected = mode == CaptureMode.PHOTO) {
-                    if (!isRecording) mode = CaptureMode.PHOTO
-                }
-                Pill("วิดีโอ", selected = mode == CaptureMode.VIDEO) {
-                    if (countdownValue == null) mode = CaptureMode.VIDEO
-                }
+                Spacer(Modifier.width(60.dp))
             }
 
             // thumbnail | shutter | flip camera
             Row(
-                Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                Modifier.fillMaxWidth().padding(horizontal = 28.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 val thumb = thumbnail
@@ -698,9 +851,9 @@ fun CameraScreen() {
                         contentDescription = null,
                         contentScale = ContentScale.Crop,
                         modifier = Modifier
-                            .size(56.dp)
-                            .clip(CircleShape)
-                            .border(2.dp, Color.White, CircleShape)
+                            .size(52.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .border(1.dp, Color.White.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
                             .clickable {
                                 lastMediaUri?.let { uri ->
                                     try {
@@ -715,37 +868,32 @@ fun CameraScreen() {
                             }
                     )
                 } else {
-                    Box(Modifier.size(56.dp))
+                    Spacer(Modifier.size(52.dp))
                 }
 
-                // shutter
+                // shutter แบบ iPhone: วงแหวนขาวบาง + วงในเปลี่ยนรูปตอนอัด
                 Box(
                     Modifier
-                        .size(76.dp)
-                        .border(4.dp, Color.White, CircleShape)
-                        .padding(6.dp)
+                        .size(78.dp)
+                        .border(3.dp, Color.White, CircleShape)
+                        .padding(5.dp)
                         .clip(CircleShape)
-                        .background(
-                            if (videoMode) Color(0xFFFF3B30) else Color.White
-                        )
-                        .clickable {
-                            if (videoMode) toggleRecord() else requestPhoto()
-                        },
+                        .background(if (shutterActive) Color(0xFFFF3B30) else Color.White)
+                        .clickable { onShutterClick() },
                     contentAlignment = Alignment.Center
                 ) {
-                    if (isRecording) {
+                    if (shutterActive) {
                         Box(
                             Modifier
-                                .size(24.dp)
-                                .clip(RoundedCornerShape(4.dp))
+                                .size(if (mode == CaptureMode.TIMELAPSE) 30.dp else 26.dp)
+                                .clip(RoundedCornerShape(if (mode == CaptureMode.TIMELAPSE) 15.dp else 6.dp))
                                 .background(Color.White)
                         )
                     }
                 }
 
-                // flip camera
-                Pill("สลับ") {
-                    if (!isRecording) {
+                GlassIcon(icon = Icons.Filled.FlipCameraAndroid) {
+                    if (!isRecording && !timelapseActive) {
                         lens = if (lens == CameraSelector.LENS_FACING_BACK) {
                             CameraSelector.LENS_FACING_FRONT
                         } else {
@@ -757,3 +905,7 @@ fun CameraScreen() {
         }
     }
 }
+
+
+
+
